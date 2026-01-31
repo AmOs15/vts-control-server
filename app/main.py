@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from app.routes.vts_debug import router as vts_debug_router
+from app.routes.ws import router as ws_router
 from app.settings import Settings
 from app.vts import VTSController
 
@@ -20,6 +21,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="vts-control-server")
     app.state.vts_controller = controller
     app.include_router(vts_debug_router)
+    app.include_router(ws_router)
     return app
 
 
