@@ -38,6 +38,7 @@ class VTSController:
         self._vts: Any = None
         self._connected = False
         self._authenticated = False
+        self._last_error: Optional[str] = None
         self._lock = asyncio.Lock()
 
     @_RETRY
@@ -47,7 +48,9 @@ class VTSController:
         try:
             await self._vts.connect()
             self._connected = True
-        except Exception:
+            self._clear_error()
+        except Exception as exc:
+            self._record_error(exc)
             await self._reset_connection()
             raise
 
@@ -59,6 +62,18 @@ class VTSController:
         async with self._lock:
             await self.ensure_authenticated()
             await self._trigger_hotkey_with_retry(hotkey_id_or_name)
+
+    def status(self) -> dict:
+        return {
+            "connected": self._connected,
+            "authenticated": self._authenticated,
+            "host": self.host,
+            "port": self.port,
+            "plugin_name": self.plugin_name,
+            "plugin_developer": self.plugin_developer,
+            "token_path": str(self.token_path),
+            "last_error": self._last_error,
+        }
 
     def _create_client(self) -> Any:
         self.token_path.parent.mkdir(parents=True, exist_ok=True)
@@ -101,34 +116,41 @@ class VTSController:
         raise RuntimeError("Unsupported pyvts constructor signature")
 
     async def _ensure_authenticated(self) -> None:
-        if not self._connected:
-            await self.connect()
+        try:
+            if not self._connected:
+                await self.connect()
 
-        if self._authenticated:
-            return
+            if self._authenticated:
+                return
 
-        request_token = getattr(self._vts, "request_authenticate_token", None)
-        request_auth = getattr(self._vts, "request_authenticate", None)
-        if not callable(request_token) or not callable(request_auth):
-            raise RuntimeError("pyvts authentication methods not found")
+            request_token = getattr(self._vts, "request_authenticate_token", None)
+            request_auth = getattr(self._vts, "request_authenticate", None)
+            if not callable(request_token) or not callable(request_auth):
+                raise RuntimeError("pyvts authentication methods not found")
 
-        if not self.token_path.exists():
-            await request_token()
+            if not self.token_path.exists():
+                await request_token()
 
-        auth_response = await request_auth()
-        if not _is_authenticated(auth_response):
-            await request_token()
             auth_response = await request_auth()
             if not _is_authenticated(auth_response):
-                raise RuntimeError("Authentication failed after token refresh")
+                await request_token()
+                auth_response = await request_auth()
+                if not _is_authenticated(auth_response):
+                    raise RuntimeError("Authentication failed after token refresh")
 
-        self._authenticated = True
+            self._authenticated = True
+            self._clear_error()
+        except Exception as exc:
+            self._record_error(exc)
+            raise
 
     @_RETRY
     async def _trigger_hotkey_with_retry(self, hotkey_id_or_name: str) -> None:
         try:
             await self._trigger_hotkey_once(hotkey_id_or_name)
-        except Exception:
+            self._clear_error()
+        except Exception as exc:
+            self._record_error(exc)
             await self._reset_connection()
             raise
 
@@ -162,6 +184,13 @@ class VTSController:
             except Exception:
                 logger.warning("Failed to close VTS connection", exc_info=True)
         self._vts = None
+
+    def _record_error(self, exc: Exception) -> None:
+        logger.warning("VTS operation failed", exc_info=True)
+        self._last_error = f"{type(exc).__name__}: {exc}"
+
+    def _clear_error(self) -> None:
+        self._last_error = None
 
 
 def _get_request_builder(module: Any, *names: str) -> Optional[Callable[..., Any]]:
